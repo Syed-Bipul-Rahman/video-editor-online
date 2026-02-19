@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Editor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Top toolbar -->
+    <header id="toolbar">
+      <div class="toolbar-left">
+        <h1>Video Editor</h1>
+      </div>
+      <div class="toolbar-center">
+        <button id="btn-undo" title="Undo (Ctrl+Z)">&#x21A9; Undo</button>
+        <button id="btn-redo" title="Redo (Ctrl+Y)">&#x21AA; Redo</button>
+        <span id="time-display">00:00.000 / 00:00.000</span>
+      </div>
+      <div class="toolbar-right">
+        <button id="btn-add-media">+ Media</button>
+        <button id="btn-add-text">+ Text</button>
+        <button id="btn-export">Export MP4</button>
+        <input type="file" id="file-input" accept="video/*,audio/*,image/*" multiple hidden>
+      </div>
+    </header>
+
+    <!-- Main area: preview + properties -->
+    <div id="main-area">
+      <div id="preview-panel">
+        <canvas id="preview-canvas" width="1280" height="720"></canvas>
+        <div id="preview-controls">
+          <button id="btn-play">&#9654;</button>
+          <button id="btn-pause">&#9646;&#9646;</button>
+          <button id="btn-stop">&#9632;</button>
+        </div>
+      </div>
+      <div id="properties-panel">
+        <h3>Properties</h3>
+        <div id="props-content">
+          <p class="hint">Select a clip to edit properties</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div id="timeline-area">
+      <div id="timeline-toolbar">
+        <button id="btn-split" title="Split at playhead">&#x2702; Split</button>
+        <button id="btn-delete" title="Delete selected">&#x2716; Delete</button>
+        <button id="btn-add-keyframe" title="Add keyframe at playhead">&#x25C6; Add Keyframe</button>
+        <button id="btn-add-layer">+ Layer</button>
+        <span id="zoom-label">Zoom:</span>
+        <input type="range" id="timeline-zoom" min="10" max="200" value="50">
+      </div>
+      <div id="timeline-container">
+        <div id="timeline-ruler"></div>
+        <div id="timeline-layers"></div>
+        <div id="playhead" style="left: 0px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export progress modal -->
+  <div id="export-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Exporting...</h3>
+      <p id="export-status">Preparing export...</p>
+      <div class="progress-bar"><div id="export-progress"></div></div>
+      <button id="export-close" class="hidden">Close</button>
+      <a id="export-download" class="hidden" download>Download MP4</a>
+    </div>
+  </div>
+
+  <script src="editor.js"></script>
+</body>
+</html>
