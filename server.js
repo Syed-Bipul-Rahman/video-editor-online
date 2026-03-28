@@ -140,11 +140,13 @@ function renderTimeline({ timeline, width, height, fps, duration, outputPath }) 
         const xOffset = Math.round(width / 2);
         const yOffset = Math.round(height / 2);
 
-        // Wrap expressions to add center offset
+        // Wrap expressions to add center offset.
+        // CRITICAL: Must single-quote x= and y= values that contain commas,
+        // because commas are filter-chain separators in -filter_complex.
         const finalX = kf.length >= 2
-          ? `(${xExpr})+${xOffset}` : `${parseInt(xExpr) + xOffset}`;
+          ? `'(${xExpr})+${xOffset}'` : `${parseInt(xExpr) + xOffset}`;
         const finalY = kf.length >= 2
-          ? `(${yExpr})+${yOffset}` : `${parseInt(yExpr) + yOffset}`;
+          ? `'(${yExpr})+${yOffset}'` : `${parseInt(yExpr) + yOffset}`;
 
         const nextOverlay = `[v${labelIdx}]`;
 

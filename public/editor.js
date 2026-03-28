@@ -19,15 +19,12 @@
     pixelsPerSecond: 50,
     undoStack: [],
     redoStack: [],
-    dragState: null,       // timeline drag
-    canvasDrag: null,      // canvas drag { mode, clipId, startMX, startMY, orig }
-    editingTextId: null,   // inline text editing on canvas
+    dragState: null,
+    canvasDrag: null,
+    editingTextId: null,
   };
 
-  // Media cache: clipId -> HTMLVideoElement | HTMLImageElement | HTMLAudioElement
-  // Also keeps "source" entries so split clips share the same media element
   const mediaCache = new Map();
-  // sourceMap: clipId -> sourceClipId (for split clips sharing media)
   const sourceMap = new Map();
 
   // --- DOM refs ---
@@ -42,7 +39,6 @@
   const fileInput = document.getElementById('file-input');
   const zoomSlider = document.getElementById('timeline-zoom');
 
-  // Hidden textarea for inline text editing
   let inlineTextInput = null;
 
   // --- Init ---
@@ -80,13 +76,87 @@
     onTimelineChanged();
   }
 
-  // After undo/redo, clips may reference IDs not in mediaCache
   function reloadMissingMedia() {
     for (const clip of state.clips) {
       if (clip.type === 'text') continue;
-      if (!getMediaForClip(clip)) {
-        loadMedia(clip);
+      if (!getMediaForClip(clip)) loadMedia(clip);
+    }
+  }
+
+  // ============================================================
+  // Keyframe-aware property update
+  // ============================================================
+  /**
+   * Update a transform property on a clip. If the clip has keyframes,
+   * update or create a keyframe at the current playhead time.
+   * This is the standard video-editor behavior: modifying a property
+   * when keyframes exist auto-updates the keyframe at current time.
+   */
+  function setClipProp(clip, prop, value) {
+    // Always update the base property
+    clip[prop] = value;
+
+    // If no keyframes, we're done
+    if (!clip.keyframes || clip.keyframes.length === 0) return;
+
+    // Only auto-update keyframes for transform properties
+    const kfProps = ['x', 'y', 'scaleX', 'scaleY', 'rotation', 'opacity'];
+    if (!kfProps.includes(prop)) return;
+
+    const localTime = state.currentTime - clip.startTime;
+    if (localTime < 0 || localTime > clip.duration) return;
+
+    // Find existing keyframe near current time
+    let kf = clip.keyframes.find(k => Math.abs(k.time - localTime) < 0.05);
+    if (kf) {
+      kf[prop] = value;
+    } else {
+      // Auto-create a new keyframe at current time with interpolated values
+      // then override the changed property
+      const interp = interpolateKeyframes(clip, localTime);
+      const newKf = {
+        time: parseFloat(localTime.toFixed(3)),
+        x: interp.x, y: interp.y,
+        scaleX: interp.scaleX, scaleY: interp.scaleY,
+        rotation: interp.rotation, opacity: interp.opacity,
+      };
+      newKf[prop] = value;
+      clip.keyframes.push(newKf);
+      clip.keyframes.sort((a, b) => a.time - b.time);
+    }
+  }
+
+  /**
+   * Bulk-set multiple transform props at once (used by canvas drag).
+   */
+  function setClipProps(clip, props) {
+    for (const [k, v] of Object.entries(props)) {
+      clip[k] = v;
+    }
+
+    if (!clip.keyframes || clip.keyframes.length === 0) return;
+
+    const localTime = state.currentTime - clip.startTime;
+    if (localTime < 0 || localTime > clip.duration) return;
+
+    let kf = clip.keyframes.find(k => Math.abs(k.time - localTime) < 0.05);
+    if (kf) {
+      for (const [k, v] of Object.entries(props)) {
+        if (k in kf) kf[k] = v;
       }
+    } else {
+      const interp = interpolateKeyframes(clip, localTime);
+      const newKf = {
+        time: parseFloat(localTime.toFixed(3)),
+        x: interp.x, y: interp.y,
+        scaleX: interp.scaleX, scaleY: interp.scaleY,
+        rotation: interp.rotation, opacity: interp.opacity,
+      };
+      for (const [k, v] of Object.entries(props)) {
+        if (k in newKf) newKf[k] = v;
+      }
+      clip.keyframes.push(newKf);
+      clip.keyframes.sort((a, b) => a.time - b.time);
     }
   }
 
@@ -101,7 +171,6 @@
   }
 
   async function loadMedia(clip) {
-    // Check if a source already exists (for split clips)
     const srcId = sourceMap.get(clip.id);
     if (srcId && mediaCache.has(srcId)) return;
 
@@ -110,16 +179,16 @@
       video.src = clip.path;
       video.muted = true;
       video.preload = 'auto';
-      await new Promise(resolve => {
-        video.addEventListener('loadeddata', resolve, { once: true });
-        video.addEventListener('error', resolve, { once: true });
+      await new Promise(r => {
+        video.addEventListener('loadeddata', r, { once: true });
+        video.addEventListener('error', r, { once: true });
         video.load();
       });
       mediaCache.set(clip.id, video);
     } else if (clip.type === 'image') {
       const img = new Image();
       img.src = clip.path;
-      await new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
+      await new Promise(r => { img.onload = r; img.onerror = r; });
       mediaCache.set(clip.id, img);
     } else if (clip.type === 'audio') {
       const audio = document.createElement('audio');
@@ -147,7 +216,6 @@
     timelineRuler.innerHTML = '';
     const totalPx = state.totalDuration * state.pixelsPerSecond;
     timelineRuler.style.width = totalPx + 'px';
-
     const step = state.pixelsPerSecond >= 80 ? 1 : state.pixelsPerSecond >= 30 ? 2 : 5;
     for (let t = 0; t <= state.totalDuration; t += step) {
       const mark = document.createElement('div');
@@ -160,7 +228,6 @@
 
   function renderTimeline() {
     timelineLayers.querySelectorAll('.timeline-clip').forEach(el => el.remove());
-
     const totalPx = state.totalDuration * state.pixelsPerSecond;
     timelineLayers.style.width = totalPx + 'px';
 
@@ -180,7 +247,6 @@
       label.textContent = clip.name || clip.type;
       el.appendChild(label);
 
-      // Trim handles
       const lh = document.createElement('div');
       lh.className = 'trim-handle left';
       el.appendChild(lh);
@@ -188,7 +254,6 @@
       rh.className = 'trim-handle right';
       el.appendChild(rh);
 
-      // Keyframe diamonds
       if (clip.keyframes) {
         for (const kf of clip.keyframes) {
           const diamond = document.createElement('div');
@@ -201,7 +266,6 @@
 
       layerEl.appendChild(el);
     }
-
     updatePlayhead();
   }
 
@@ -254,18 +318,15 @@
       renderTimeline();
     });
 
-    // Timeline interactions
     timelineContainer.addEventListener('mousedown', onTimelineMouseDown);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
 
-    // Canvas interactions — click to select, drag to move, dblclick to edit text
     canvas.addEventListener('mousedown', onCanvasMouseDown);
     canvas.addEventListener('dblclick', onCanvasDblClick);
 
-    // Keyboard
     window.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
       if (state.editingTextId) return;
       if (e.ctrlKey || e.metaKey) {
         if (e.key === 'z') { e.preventDefault(); undo(); }
@@ -363,23 +424,28 @@
       const dyCanvas = my - startMY;
 
       if (mode === 'move') {
-        clip.x = orig.x + dxCanvas;
-        clip.y = orig.y + dyCanvas;
+        setClipProps(clip, {
+          x: orig.x + dxCanvas,
+          y: orig.y + dyCanvas,
+        });
       } else if (mode === 'scale') {
-        // Drag from corner: compute scale factor from distance to center
-        const centerX = (orig.x || 0) + CANVAS_W / 2;
-        const centerY = (orig.y || 0) + CANVAS_H / 2;
+        const centerX = orig.x + CANVAS_W / 2;
+        const centerY = orig.y + CANVAS_H / 2;
         const origDist = Math.hypot(startMX - centerX, startMY - centerY) || 1;
         const newDist = Math.hypot(mx - centerX, my - centerY);
         const factor = newDist / origDist;
-        clip.scaleX = Math.max(0.05, orig.scaleX * factor);
-        clip.scaleY = Math.max(0.05, orig.scaleY * factor);
+        setClipProps(clip, {
+          scaleX: Math.max(0.05, orig.scaleX * factor),
+          scaleY: Math.max(0.05, orig.scaleY * factor),
+        });
       } else if (mode === 'rotate') {
-        const centerX = (orig.x || 0) + CANVAS_W / 2;
-        const centerY = (orig.y || 0) + CANVAS_H / 2;
+        const centerX = orig.x + CANVAS_W / 2;
+        const centerY = orig.y + CANVAS_H / 2;
         const origAngle = Math.atan2(startMY - centerY, startMX - centerX);
         const newAngle = Math.atan2(my - centerY, mx - centerX);
-        clip.rotation = orig.rotation + (newAngle - origAngle) * 180 / Math.PI;
+        setClipProps(clip, {
+          rotation: orig.rotation + (newAngle - origAngle) * 180 / Math.PI,
+        });
       }
 
       renderFrame();
@@ -393,15 +459,13 @@
   }
 
   // ============================================================
-  // Canvas interaction — select, move, scale, rotate
+  // Canvas interaction
   // ============================================================
   function canvasToLocal(e) {
     const rect = canvas.getBoundingClientRect();
-    const scaleX = CANVAS_W / rect.width;
-    const scaleY = CANVAS_H / rect.height;
     return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+      x: (e.clientX - rect.left) * (CANVAS_W / rect.width),
+      y: (e.clientY - rect.top) * (CANVAS_H / rect.height),
     };
   }
 
@@ -423,28 +487,18 @@
       ctx.restore();
     } else if (clip.type === 'video') {
       const media = getMediaForClip(clip);
-      if (media) {
+      if (media && media.videoWidth) {
         const aspect = media.videoWidth / media.videoHeight;
-        if (aspect > CANVAS_W / CANVAS_H) {
-          hw = CANVAS_W / 2; hh = (CANVAS_W / aspect) / 2;
-        } else {
-          hh = CANVAS_H / 2; hw = (CANVAS_H * aspect) / 2;
-        }
-      } else {
-        hw = CANVAS_W / 2; hh = CANVAS_H / 2;
-      }
+        if (aspect > CANVAS_W / CANVAS_H) { hw = CANVAS_W / 2; hh = (CANVAS_W / aspect) / 2; }
+        else { hh = CANVAS_H / 2; hw = (CANVAS_H * aspect) / 2; }
+      } else { hw = CANVAS_W / 2; hh = CANVAS_H / 2; }
     } else if (clip.type === 'image') {
       const media = getMediaForClip(clip);
-      if (media) {
+      if (media && media.naturalWidth) {
         const aspect = media.naturalWidth / media.naturalHeight;
-        if (aspect > CANVAS_W / CANVAS_H) {
-          hw = CANVAS_W / 2; hh = (CANVAS_W / aspect) / 2;
-        } else {
-          hh = CANVAS_H / 2; hw = (CANVAS_H * aspect) / 2;
-        }
-      } else {
-        hw = CANVAS_W / 2; hh = CANVAS_H / 2;
-      }
+        if (aspect > CANVAS_W / CANVAS_H) { hw = CANVAS_W / 2; hh = (CANVAS_W / aspect) / 2; }
+        else { hh = CANVAS_H / 2; hw = (CANVAS_H * aspect) / 2; }
+      } else { hw = CANVAS_W / 2; hh = CANVAS_H / 2; }
     } else {
       hw = 50; hh = 20;
     }
@@ -458,27 +512,21 @@
 
     const b = getClipBounds(clip);
     const rot = -b.rotation * Math.PI / 180;
-    // Rotate point into clip's local space
     const dx = px - b.cx;
     const dy = py - b.cy;
     const lx = dx * Math.cos(rot) - dy * Math.sin(rot);
     const ly = dx * Math.sin(rot) + dy * Math.cos(rot);
 
     const handleSize = 14;
-    const rotHandleDist = b.hh + 30;
 
-    // Rotation handle (top center, above bounding box)
-    const rotDx = lx - 0;
-    const rotDy = ly - (-rotHandleDist);
-    if (Math.hypot(rotDx, rotDy) < handleSize) return 'rotate';
+    // Rotation handle
+    const rotHandleDist = b.hh + 30;
+    if (Math.hypot(lx, ly - (-rotHandleDist)) < handleSize) return 'rotate';
 
     // Scale handles (corners)
-    const corners = [
-      { x: -b.hw, y: -b.hh }, { x: b.hw, y: -b.hh },
-      { x: -b.hw, y: b.hh },  { x: b.hw, y: b.hh },
-    ];
+    const corners = [[-b.hw, -b.hh], [b.hw, -b.hh], [-b.hw, b.hh], [b.hw, b.hh]];
     for (const c of corners) {
-      if (Math.hypot(lx - c.x, ly - c.y) < handleSize) return 'scale';
+      if (Math.hypot(lx - c[0], ly - c[1]) < handleSize) return 'scale';
     }
 
     // Body
@@ -491,27 +539,28 @@
     finishInlineEdit();
     const { x: mx, y: my } = canvasToLocal(e);
 
-    // Test clips in reverse layer order (top = drawn last = clicked first)
     const visible = state.clips
       .filter(c => state.currentTime >= c.startTime && state.currentTime < c.startTime + c.duration)
       .sort((a, b) => b.layer - a.layer);
 
-    // First check if clicking on selected clip's handles
+    // Check selected clip's handles first
     if (state.selectedId) {
       const sel = visible.find(c => c.id === state.selectedId);
       if (sel) {
         const hit = hitTestClip(sel, mx, my);
         if (hit) {
           pushUndo();
+          // Use INTERPOLATED values as the drag origin (key fix!)
+          const localTime = state.currentTime - sel.startTime;
+          const interp = interpolateKeyframes(sel, localTime);
           state.canvasDrag = {
             clipId: sel.id,
             mode: hit,
-            startMX: mx,
-            startMY: my,
+            startMX: mx, startMY: my,
             orig: {
-              x: sel.x || 0, y: sel.y || 0,
-              scaleX: sel.scaleX || 1, scaleY: sel.scaleY || 1,
-              rotation: sel.rotation || 0,
+              x: interp.x || 0, y: interp.y || 0,
+              scaleX: interp.scaleX || 1, scaleY: interp.scaleY || 1,
+              rotation: interp.rotation || 0,
             },
           };
           return;
@@ -525,15 +574,16 @@
       if (hit) {
         state.selectedId = clip.id;
         pushUndo();
+        const localTime = state.currentTime - clip.startTime;
+        const interp = interpolateKeyframes(clip, localTime);
         state.canvasDrag = {
           clipId: clip.id,
           mode: hit,
-          startMX: mx,
-          startMY: my,
+          startMX: mx, startMY: my,
           orig: {
-            x: clip.x || 0, y: clip.y || 0,
-            scaleX: clip.scaleX || 1, scaleY: clip.scaleY || 1,
-            rotation: clip.rotation || 0,
+            x: interp.x || 0, y: interp.y || 0,
+            scaleX: interp.scaleX || 1, scaleY: interp.scaleY || 1,
+            rotation: interp.rotation || 0,
           },
         };
         renderTimeline();
@@ -543,7 +593,7 @@
       }
     }
 
-    // Clicked empty area — deselect
+    // Clicked empty area
     state.selectedId = null;
     renderTimeline();
     renderProperties();
@@ -557,15 +607,12 @@
       .sort((a, b) => b.layer - a.layer);
 
     for (const clip of visible) {
-      if (hitTestClip(clip, mx, my)) {
-        startInlineEdit(clip);
-        return;
-      }
+      if (hitTestClip(clip, mx, my)) { startInlineEdit(clip); return; }
     }
   }
 
   // ============================================================
-  // Inline text editing on canvas
+  // Inline text editing
   // ============================================================
   function startInlineEdit(clip) {
     finishInlineEdit();
@@ -594,7 +641,7 @@
 
     inlineTextInput.addEventListener('blur', () => finishInlineEdit());
     inlineTextInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { inlineTextInput.blur(); }
+      if (e.key === 'Escape') inlineTextInput.blur();
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); inlineTextInput.blur(); }
     });
   }
@@ -618,7 +665,6 @@
   async function handleFileUpload(e) {
     const files = Array.from(e.target.files);
     if (!files.length) return;
-
     pushUndo();
 
     for (const file of files) {
@@ -631,23 +677,15 @@
         if (data.error) { alert(data.error); continue; }
 
         const clip = {
-          id: data.id,
-          type: data.type,
-          name: data.filename,
-          path: data.path,
+          id: data.id, type: data.type, name: data.filename, path: data.path,
           startTime: findNextFreePosition(0),
           duration: data.type === 'image' ? 5 : data.duration,
           trimStart: 0,
           layer: findFreeLayer(),
-          x: 0, y: 0,
-          scaleX: 1, scaleY: 1,
-          rotation: 0,
-          opacity: 1,
+          x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1,
           keyframes: [],
-          sourceWidth: data.width,
-          sourceHeight: data.height,
+          sourceWidth: data.width, sourceHeight: data.height,
         };
-
         state.clips.push(clip);
         await loadMedia(clip);
       } catch (err) {
@@ -681,20 +719,11 @@
   function addTextClip() {
     pushUndo();
     const clip = {
-      id: generateId(),
-      type: 'text',
-      name: 'Text',
-      text: 'Hello World',
-      startTime: state.currentTime,
-      duration: 5,
+      id: generateId(), type: 'text', name: 'Text', text: 'Hello World',
+      startTime: state.currentTime, duration: 5,
       layer: findFreeLayer(),
-      x: 0, y: 0,
-      scaleX: 1, scaleY: 1,
-      rotation: 0,
-      opacity: 1,
-      fontSize: 48,
-      fontFamily: 'Arial',
-      color: '#ffffff',
+      x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1,
+      fontSize: 48, fontFamily: 'Arial', color: '#ffffff',
       keyframes: [],
     };
     state.clips.push(clip);
@@ -729,11 +758,10 @@
     clip.duration = localTime;
     clip.keyframes = clip.keyframes.filter(kf => kf.time <= localTime);
 
-    // Share media element: map new clip ID to original clip's media source
+    // Share media: create new element for independent seeking
     const origSourceId = sourceMap.get(clip.id) || clip.id;
     sourceMap.set(newId, origSourceId);
 
-    // For images, we need a separate element since they're stateless
     if (clip.type === 'image') {
       const origImg = getMediaForClip(clip);
       if (origImg) {
@@ -742,8 +770,6 @@
         mediaCache.set(newId, newImg);
       }
     }
-    // For video, create a new video element pointing to the same src
-    // so the two halves can seek independently
     if (clip.type === 'video') {
       const origVideo = getMediaForClip(clip);
       if (origVideo) {
@@ -788,17 +814,18 @@
 
     if (!clip.keyframes) clip.keyframes = [];
 
-    // Remove existing keyframe at same time
     clip.keyframes = clip.keyframes.filter(kf => Math.abs(kf.time - localTime) > 0.01);
+
+    // Capture current interpolated values (or base props if no keyframes yet)
+    const interp = clip.keyframes.length > 0
+      ? interpolateKeyframes(clip, localTime)
+      : { x: clip.x || 0, y: clip.y || 0, scaleX: clip.scaleX || 1, scaleY: clip.scaleY || 1, rotation: clip.rotation || 0, opacity: clip.opacity !== undefined ? clip.opacity : 1 };
 
     clip.keyframes.push({
       time: parseFloat(localTime.toFixed(3)),
-      x: clip.x || 0,
-      y: clip.y || 0,
-      scaleX: clip.scaleX || 1,
-      scaleY: clip.scaleY || 1,
-      rotation: clip.rotation || 0,
-      opacity: clip.opacity !== undefined ? clip.opacity : 1,
+      x: interp.x, y: interp.y,
+      scaleX: interp.scaleX, scaleY: interp.scaleY,
+      rotation: interp.rotation, opacity: interp.opacity,
     });
 
     clip.keyframes.sort((a, b) => a.time - b.time);
@@ -815,7 +842,6 @@
         opacity: clip.opacity !== undefined ? clip.opacity : 1,
       };
     }
-
     if (kf.length === 1) return { ...kf[0] };
 
     if (localTime <= kf[0].time) return { ...kf[0] };
@@ -830,12 +856,9 @@
 
     const t = (localTime - prev.time) / (next.time - prev.time || 0.001);
     return {
-      x: lerp(prev.x, next.x, t),
-      y: lerp(prev.y, next.y, t),
-      scaleX: lerp(prev.scaleX, next.scaleX, t),
-      scaleY: lerp(prev.scaleY, next.scaleY, t),
-      rotation: lerp(prev.rotation, next.rotation, t),
-      opacity: lerp(prev.opacity, next.opacity, t),
+      x: lerp(prev.x, next.x, t), y: lerp(prev.y, next.y, t),
+      scaleX: lerp(prev.scaleX, next.scaleX, t), scaleY: lerp(prev.scaleY, next.scaleY, t),
+      rotation: lerp(prev.rotation, next.rotation, t), opacity: lerp(prev.opacity, next.opacity, t),
     };
   }
 
@@ -852,8 +875,6 @@
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
     const t = state.currentTime;
-
-    // Visible clips sorted by layer (lower drawn first)
     const visible = state.clips
       .filter(c => t >= c.startTime && t < c.startTime + c.duration)
       .sort((a, b) => a.layer - b.layer);
@@ -875,13 +896,11 @@
         const video = getMediaForClip(clip);
         if (video) {
           const seekTime = (clip.trimStart || 0) + localTime;
-          if (Math.abs(video.currentTime - seekTime) > 0.15) {
-            video.currentTime = seekTime;
-          }
+          if (Math.abs(video.currentTime - seekTime) > 0.15) video.currentTime = seekTime;
           const aspect = video.videoWidth / video.videoHeight || 16 / 9;
           let dw = CANVAS_W, dh = CANVAS_H;
-          if (aspect > CANVAS_W / CANVAS_H) { dh = CANVAS_W / aspect; }
-          else { dw = CANVAS_H * aspect; }
+          if (aspect > CANVAS_W / CANVAS_H) dh = CANVAS_W / aspect;
+          else dw = CANVAS_H * aspect;
           ctx.drawImage(video, -dw / 2, -dh / 2, dw, dh);
         }
       } else if (clip.type === 'image') {
@@ -889,8 +908,8 @@
         if (img && img.naturalWidth) {
           const aspect = img.naturalWidth / img.naturalHeight;
           let dw = CANVAS_W, dh = CANVAS_H;
-          if (aspect > CANVAS_W / CANVAS_H) { dh = CANVAS_W / aspect; }
-          else { dw = CANVAS_H * aspect; }
+          if (aspect > CANVAS_W / CANVAS_H) dh = CANVAS_W / aspect;
+          else dw = CANVAS_H * aspect;
           ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
         }
       } else if (clip.type === 'text') {
@@ -904,7 +923,6 @@
       ctx.restore();
     }
 
-    // Draw transform gizmo for selected clip
     drawTransformGizmo(visible);
   }
 
@@ -926,17 +944,13 @@
     ctx.setLineDash([]);
     ctx.strokeRect(-b.hw, -b.hh, b.hw * 2, b.hh * 2);
 
-    // Corner handles (scale)
-    const corners = [
-      [-b.hw, -b.hh], [b.hw, -b.hh],
-      [-b.hw, b.hh], [b.hw, b.hh],
-    ];
+    // Corner handles
     ctx.fillStyle = '#00bfff';
-    for (const [hx, hy] of corners) {
+    for (const [hx, hy] of [[-b.hw, -b.hh], [b.hw, -b.hh], [-b.hw, b.hh], [b.hw, b.hh]]) {
       ctx.fillRect(hx - 5, hy - 5, 10, 10);
     }
 
-    // Rotation handle (line + circle above top center)
+    // Rotation handle
     ctx.beginPath();
     ctx.moveTo(0, -b.hh);
     ctx.lineTo(0, -b.hh - 30);
@@ -975,30 +989,14 @@
     requestAnimationFrame(tick);
   }
 
-  function play() {
-    state.playing = true;
-    lastTickTime = performance.now();
-    syncAudioVideo();
-  }
-
-  function pause() {
-    state.playing = false;
-    pauseAllMedia();
-  }
-
-  function stop() {
-    state.playing = false;
-    state.currentTime = 0;
-    pauseAllMedia();
-    updatePlayhead();
-    renderFrame();
-  }
+  function play() { state.playing = true; lastTickTime = performance.now(); syncAudioVideo(); }
+  function pause() { state.playing = false; pauseAllMedia(); }
+  function stop() { state.playing = false; state.currentTime = 0; pauseAllMedia(); updatePlayhead(); renderFrame(); }
 
   function syncAudioVideo() {
     for (const clip of state.clips) {
       const media = getMediaForClip(clip);
       if (!media) continue;
-
       const localTime = state.currentTime - clip.startTime;
       const inRange = localTime >= 0 && localTime < clip.duration;
 
@@ -1031,6 +1029,12 @@
       return;
     }
 
+    // Get current interpolated values for display
+    const localTime = state.currentTime - clip.startTime;
+    const interp = (clip.keyframes && clip.keyframes.length > 0)
+      ? interpolateKeyframes(clip, localTime)
+      : { x: clip.x || 0, y: clip.y || 0, scaleX: clip.scaleX || 1, scaleY: clip.scaleY || 1, rotation: clip.rotation || 0, opacity: clip.opacity !== undefined ? clip.opacity : 1 };
+
     let html = `<div class="prop-group"><label>Name</label>
       <input type="text" id="prop-name" value="${esc(clip.name || '')}"></div>`;
 
@@ -1048,56 +1052,36 @@
         <input type="number" id="prop-trim" value="${(clip.trimStart || 0).toFixed(3)}" step="0.1" min="0"></div>
     </div>`;
 
-    // Position / Transform
-    html += `<div class="prop-row">
-      <div class="prop-group"><label>X</label>
-        <input type="number" id="prop-x" value="${Math.round(clip.x || 0)}" step="1"></div>
-      <div class="prop-group"><label>Y</label>
-        <input type="number" id="prop-y" value="${Math.round(clip.y || 0)}" step="1"></div>
-    </div>`;
-
-    html += `<div class="prop-row">
-      <div class="prop-group"><label>Scale X</label>
-        <input type="number" id="prop-scaleX" value="${(clip.scaleX || 1).toFixed(2)}" step="0.05" min="0.05"></div>
-      <div class="prop-group"><label>Scale Y</label>
-        <input type="number" id="prop-scaleY" value="${(clip.scaleY || 1).toFixed(2)}" step="0.05" min="0.05"></div>
-    </div>`;
-
-    html += `<div class="prop-row">
-      <div class="prop-group"><label>Rotation</label>
-        <input type="number" id="prop-rotation" value="${Math.round(clip.rotation || 0)}" step="1"></div>
-      <div class="prop-group"><label>Opacity</label>
-        <input type="number" id="prop-opacity" value="${(clip.opacity !== undefined ? clip.opacity : 1).toFixed(2)}" step="0.05" min="0" max="1"></div>
-    </div>`;
+    // --- Transform sliders ---
+    html += sliderRow('X', 'prop-x', interp.x, -1000, 1000, 1);
+    html += sliderRow('Y', 'prop-y', interp.y, -600, 600, 1);
+    html += sliderRow('Scale X', 'prop-scaleX', interp.scaleX, 0.05, 4, 0.05, 2);
+    html += sliderRow('Scale Y', 'prop-scaleY', interp.scaleY, 0.05, 4, 0.05, 2);
+    html += sliderRow('Rotation', 'prop-rotation', interp.rotation, -360, 360, 1);
+    html += sliderRow('Opacity', 'prop-opacity', interp.opacity, 0, 1, 0.01, 2);
 
     if (clip.type === 'text') {
       html += `<div class="prop-group"><label>Text</label>
         <textarea id="prop-text">${esc(clip.text || '')}</textarea></div>`;
 
-      // Font size: slider + number input
       html += `<div class="prop-group"><label>Font Size</label>
         <div class="slider-row">
           <input type="range" id="prop-fontSize-slider" min="8" max="200" value="${clip.fontSize || 48}" class="prop-slider">
           <input type="number" id="prop-fontSize" value="${clip.fontSize || 48}" min="8" max="400" class="prop-number-sm">
-        </div>
-      </div>`;
+        </div></div>`;
 
-      // Color: color picker + text input
       html += `<div class="prop-group"><label>Color</label>
         <div class="color-row">
           <input type="color" id="prop-color-picker" value="${clip.color || '#ffffff'}" class="prop-color-picker">
           <input type="text" id="prop-color" value="${clip.color || '#ffffff'}" class="prop-color-text">
-        </div>
-      </div>`;
+        </div></div>`;
 
-      // Font family
       html += `<div class="prop-group"><label>Font</label>
         <select id="prop-fontFamily" class="prop-select">
           ${['Arial', 'Helvetica', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana', 'Impact', 'Comic Sans MS'].map(
             f => `<option value="${f}" ${clip.fontFamily === f ? 'selected' : ''}>${f}</option>`
           ).join('')}
-        </select>
-      </div>`;
+        </select></div>`;
     }
 
     // Keyframes list
@@ -1119,7 +1103,8 @@
     propsContent.innerHTML = html;
 
     // --- Bind events ---
-    const bindInput = (id, prop, parse) => {
+    // Non-transform props (directly set on clip)
+    const bindDirect = (id, prop, parse) => {
       const el = document.getElementById(id);
       if (!el) return;
       el.addEventListener('change', () => {
@@ -1129,21 +1114,46 @@
       });
     };
 
-    bindInput('prop-name', 'name');
-    bindInput('prop-start', 'startTime', parseFloat);
-    bindInput('prop-duration', 'duration', parseFloat);
-    bindInput('prop-layer', 'layer', parseInt);
-    bindInput('prop-trim', 'trimStart', parseFloat);
-    bindInput('prop-x', 'x', parseFloat);
-    bindInput('prop-y', 'y', parseFloat);
-    bindInput('prop-scaleX', 'scaleX', parseFloat);
-    bindInput('prop-scaleY', 'scaleY', parseFloat);
-    bindInput('prop-rotation', 'rotation', parseFloat);
-    bindInput('prop-opacity', 'opacity', parseFloat);
-    bindInput('prop-text', 'text');
-    bindInput('prop-fontFamily', 'fontFamily');
+    bindDirect('prop-name', 'name');
+    bindDirect('prop-start', 'startTime', parseFloat);
+    bindDirect('prop-duration', 'duration', parseFloat);
+    bindDirect('prop-layer', 'layer', parseInt);
+    bindDirect('prop-trim', 'trimStart', parseFloat);
+    bindDirect('prop-text', 'text');
+    bindDirect('prop-fontFamily', 'fontFamily');
 
-    // Font size: link slider and number input
+    // Transform props: use setClipProp for keyframe-aware updates
+    const bindTransformSlider = (sliderId, numberId, prop, parse, decimals) => {
+      const slider = document.getElementById(sliderId);
+      const num = document.getElementById(numberId);
+      if (!slider || !num) return;
+
+      slider.addEventListener('input', () => {
+        num.value = decimals ? parseFloat(slider.value).toFixed(decimals) : slider.value;
+        setClipProp(clip, prop, parse(slider.value));
+        renderFrame();
+      });
+      slider.addEventListener('change', () => {
+        pushUndo();
+        setClipProp(clip, prop, parse(slider.value));
+        onTimelineChanged();
+      });
+      num.addEventListener('change', () => {
+        pushUndo();
+        slider.value = num.value;
+        setClipProp(clip, prop, parse(num.value));
+        onTimelineChanged();
+      });
+    };
+
+    bindTransformSlider('prop-x-slider', 'prop-x', 'x', parseFloat, 0);
+    bindTransformSlider('prop-y-slider', 'prop-y', 'y', parseFloat, 0);
+    bindTransformSlider('prop-scaleX-slider', 'prop-scaleX', 'scaleX', parseFloat, 2);
+    bindTransformSlider('prop-scaleY-slider', 'prop-scaleY', 'scaleY', parseFloat, 2);
+    bindTransformSlider('prop-rotation-slider', 'prop-rotation', 'rotation', parseFloat, 0);
+    bindTransformSlider('prop-opacity-slider', 'prop-opacity', 'opacity', parseFloat, 2);
+
+    // Font size slider
     const fsSlider = document.getElementById('prop-fontSize-slider');
     const fsNumber = document.getElementById('prop-fontSize');
     if (fsSlider && fsNumber) {
@@ -1165,7 +1175,7 @@
       });
     }
 
-    // Color: link picker and text input
+    // Color picker
     const colorPicker = document.getElementById('prop-color-picker');
     const colorText = document.getElementById('prop-color');
     if (colorPicker && colorText) {
@@ -1188,30 +1198,41 @@
       });
     }
 
-    // Keyframe delete buttons
+    // Keyframe delete
     propsContent.querySelectorAll('.kf-delete').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         pushUndo();
-        const idx = parseInt(e.target.dataset.kfIndex);
-        clip.keyframes.splice(idx, 1);
+        clip.keyframes.splice(parseInt(e.target.dataset.kfIndex), 1);
         onTimelineChanged();
       });
     });
 
-    // Click keyframe item to seek
+    // Click keyframe to seek
     propsContent.querySelectorAll('.keyframe-item').forEach(item => {
       item.addEventListener('click', (e) => {
         if (e.target.classList.contains('kf-delete')) return;
-        const idx = parseInt(item.dataset.kfIndex);
-        const kf = clip.keyframes[idx];
+        const kf = clip.keyframes[parseInt(item.dataset.kfIndex)];
         if (kf) {
           state.currentTime = clip.startTime + kf.time;
           updatePlayhead();
           renderFrame();
+          renderProperties(); // refresh slider values for this keyframe
         }
       });
     });
+  }
+
+  /**
+   * Generate HTML for a slider + number input row.
+   */
+  function sliderRow(label, id, value, min, max, step, decimals = 0) {
+    const displayVal = decimals ? parseFloat(value).toFixed(decimals) : Math.round(value);
+    return `<div class="prop-group"><label>${label}</label>
+      <div class="slider-row">
+        <input type="range" id="${id}-slider" min="${min}" max="${max}" step="${step}" value="${value}" class="prop-slider">
+        <input type="number" id="${id}" value="${displayVal}" step="${step}" class="prop-number-sm">
+      </div></div>`;
   }
 
   // ============================================================
@@ -1240,10 +1261,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          timeline,
-          width: 1920,
-          height: 1080,
-          fps: 30,
+          timeline, width: 1920, height: 1080, fps: 30,
           duration: state.totalDuration - 5,
         }),
       });
@@ -1284,6 +1302,5 @@
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // --- Boot ---
   init();
 })();
